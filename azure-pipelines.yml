@@ -1,0 +1,91 @@
+trigger:
+- main
+
+variables:
+- group: azure-shopify
+
+# pool de la maquina con el agente 
+pool:
+  name: SelfHosted-Linux
+  demands:
+  - agent.os -equals Linux
+
+stages:
+# 1) Lint + Tests
+- stage: Lint_Test
+  displayName: Lint & Test
+  jobs:
+  - job: lint_and_test
+    displayName: Lint + Cypress
+    steps:
+    - checkout: self
+      fetchDepth: 1
+
+    - task: NodeTool@0
+      displayName: Use Node 20.x
+      inputs:
+        versionSpec: '20.x'
+
+    - script: npm ci
+      displayName: npm ci
+
+    - script: npm run lint
+      displayName: Lint
+
+    - bash: |
+        set -euxo pipefail
+
+        # instala deps, lint y build (si ya lo hiciste en pasos previos, puedes quitar estas 3 líneas)
+        npm ci
+        npm run lint
+        npm run build
+
+        # 1) Arranca Vite preview en background y redirige su salida (para que no herede los STDIO del job)
+        npx vite preview --port 5173 --strictPort >/tmp/vite.log 2>&1 &
+        PREVIEW_PID=$!
+        echo "Vite preview PID: $PREVIEW_PID"
+
+        # 2) Limpieza garantizada aunque falle el job
+        cleanup() {
+          echo "Stopping preview $PREVIEW_PID"
+          kill $PREVIEW_PID 2>/dev/null || true
+          pkill -P $PREVIEW_PID 2>/dev/null || true
+          wait $PREVIEW_PID 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        # 3) Espera a que el servidor responda (si falla, muestra el log y sal)
+        if ! npx wait-on -t 30000 http://localhost:5173; then
+          echo "===== Vite preview log ====="
+          tail -n +1 /tmp/vite.log || true
+          exit 1
+        fi
+
+        # 4) Ejecuta Cypress en headless con Xvfb
+        xvfb-run -a npx cypress run --browser electron
+      displayName: Build app, start preview, run Cypress, stop preview
+
+# 2) Build Docker + despliegue a entorno de pruebas en la VM del agente
+- stage: Build_And_Deploy
+  displayName: Build & Deploy (VM Agent)
+  dependsOn: Lint_Test
+  condition: succeeded()
+  jobs:
+  - job: build_deploy
+    displayName: Build image & run container
+    steps:
+    - checkout: self
+      fetchDepth: 1
+    # Build and docker run
+    - bash: |
+        set -eux
+        IMAGE="shopifyweb:$(Build.BuildId)"
+        docker build -t "$IMAGE" .
+
+        # Reinicia el contenedor para este build
+        docker rm -f shopifyweb || true
+        docker run -d --name shopifyweb -p 5173:5173 "$IMAGE"
+
+        ip=$(hostname -I | awk '{print $1}')
+        echo "Aplicación levantada en http://$ip:5173"
+      displayName: Build & run container on agent VM
