@@ -35,11 +35,6 @@ stages:
     - bash: |
         set -euxo pipefail
 
-        # instala deps, lint y build (si ya lo hiciste en pasos previos, puedes quitar estas 3 líneas)
-        npm ci
-        npm run lint
-        npm run build
-
         # 1) Arranca Vite preview en background y redirige su salida (para que no herede los STDIO del job)
         npx vite preview --port 5173 --strictPort >/tmp/vite.log 2>&1 &
         PREVIEW_PID=$!
